@@ -12,7 +12,7 @@
 
             <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
                 <TextBox x:Name="SearchTextBox"
-                         Width="350" Height="40" 
+                         Width="250" Height="40" 
                          FontSize="16"
                          VerticalContentAlignment="Center"
                          Padding="10"
@@ -20,14 +20,15 @@
                          Foreground="#999"
                          GotFocus="SearchTextBox_GotFocus"
                          LostFocus="SearchTextBox_LostFocus"/>
+                <DatePicker x:Name="FilterDatePicker" Width="200" Height="40" FontSize="16" Margin="10,0,10,0"/>
                 <Button Content="Search" 
                         Width="120" Height="40" 
                         Background="#C62828" 
                         Foreground="White" 
                         BorderThickness="0" 
                         FontSize="16"
-                        Margin="10,0,0,0"
-                        Cursor="Hand"/>
+                        Cursor="Hand"
+                        Click="SearchButton_Click"/>
                 <Button Content="Refresh" 
                         Width="120" Height="40" 
                         Background="#0541A5" 
@@ -37,6 +38,15 @@
                         Margin="10,0,0,0"
                         Cursor="Hand"
                         Click="RefreshButton_Click"/>
+                <Button Content="Reset" 
+                        Width="90" Height="40" 
+                        Background="#666" 
+                        Foreground="White" 
+                        BorderThickness="0" 
+                        FontSize="16"
+                        Margin="10,0,0,0"
+                        Cursor="Hand"
+                        Click="ResetButton_Click"/>
             </StackPanel>
 
             <!-- Summary Cards -->

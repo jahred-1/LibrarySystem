@@ -1,5 +1,5 @@
 using LibrarySystem.Models;
-using Microsoft.Data.Sqlite;
+using MySqlConnector;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -13,16 +13,6 @@ namespace LibrarySystem
         public static event Action? DataChanged;
 
         private static readonly object _lock = new object();
-        private static readonly string DataFolder;
-        private static readonly string DatabasePath;
-
-        static DatabaseHelper()
-        {
-            string appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            DataFolder = Path.Combine(appData, "LibrarySystem");
-            if (!Directory.Exists(DataFolder)) Directory.CreateDirectory(DataFolder);
-            DatabasePath = Path.Combine(DataFolder, "LibrarySystem.db");
-        }
 
         private static void OnDataChanged()
         {
@@ -35,22 +25,30 @@ namespace LibrarySystem
 
         private static string GetConnectionString()
         {
-            return $"Data Source={DatabasePath};";
+            // Update these values to match your MySQL server configuration
+            // Format: Server=hostname;Database=database_name;User=username;Password=password;Port=port;
+            // For XAMPP/WAMP default: Server=localhost;Database=lib_db;User=root;Password=;Port=3306;
+            return "Server=localhost;Database=lib_db;User=root;Password=;Port=3306;";
         }
 
-        // Public initialization - creates database and tables if needed
+        // Public initialization - assumes database and tables already exist from SQL file
         public static void InitializeDatabase()
         {
             lock (_lock)
             {
-                EnsureDatabaseAndTables();
-                
-                // Migrate from JSON if it exists and database is empty
-                var accountsFile = Path.Combine(DataFolder, "accounts.json");
-                if (File.Exists(accountsFile))
+                // Test connection
+                try
                 {
-                    MigrateFromJson(accountsFile);
+                    using var conn = new MySqlConnection(GetConnectionString());
+                    conn.Open();
                 }
+                catch (Exception ex)
+                {
+                    throw new Exception($"Failed to connect to MySQL database. Please ensure MySQL is running and the database 'lib_db' exists. Error: {ex.Message}", ex);
+                }
+
+                // Migrate existing plain text passwords to hashed passwords
+                MigratePasswordsToHashed();
 
                 // Seed default data if database is empty
                 if (GetTotalBooks() == 0)
@@ -66,113 +64,95 @@ namespace LibrarySystem
             OnDataChanged();
         }
 
-        private static void EnsureDatabaseAndTables()
+        // Migrate existing plain text passwords to hashed passwords
+        private static void MigratePasswordsToHashed()
         {
-            using var conn = new SqliteConnection(GetConnectionString());
-            conn.Open();
+            try
+            {
+                using var conn = new MySqlConnection(GetConnectionString());
+                conn.Open();
 
-            // Create tables
-            var createTables = @"
-                CREATE TABLE IF NOT EXISTS Students (
-                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    StudentId TEXT UNIQUE NOT NULL,
-                    FullName TEXT NOT NULL,
-                    Email TEXT UNIQUE NOT NULL,
-                    Password TEXT NOT NULL,
-                    Course TEXT NOT NULL,
-                    Section TEXT NOT NULL,
-                    CreatedAt TEXT NOT NULL,
-                    IsActive INTEGER NOT NULL DEFAULT 1
-                );
+                // Migrate Admin passwords
+                using var adminCmd = new MySqlCommand("SELECT Id, Password FROM Admins", conn);
+                using var adminReader = adminCmd.ExecuteReader();
+                var adminUpdates = new List<(int Id, string Password)>();
+                while (adminReader.Read())
+                {
+                    var id = adminReader.GetInt32(0);
+                    var password = adminReader.GetString(1);
+                    // Check if password is already hashed (hashed passwords are longer, typically 44 chars for Base64 SHA256)
+                    // Plain text passwords like "admin123" are short
+                    if (password.Length < 40 || password == "admin123" || password == "pass")
+                    {
+                        adminUpdates.Add((id, password));
+                    }
+                }
+                adminReader.Close();
 
-                CREATE TABLE IF NOT EXISTS Admins (
-                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    Email TEXT UNIQUE NOT NULL,
-                    Password TEXT NOT NULL,
-                    FullName TEXT NOT NULL,
-                    CreatedAt TEXT NOT NULL
-                );
+                foreach (var (id, plainPassword) in adminUpdates)
+                {
+                    using var updateCmd = new MySqlCommand("UPDATE Admins SET Password = @password WHERE Id = @id", conn);
+                    updateCmd.Parameters.AddWithValue("@id", id);
+                    updateCmd.Parameters.AddWithValue("@password", PasswordHelper.HashPassword(plainPassword));
+                    updateCmd.ExecuteNonQuery();
+                }
 
-                CREATE TABLE IF NOT EXISTS Books (
-                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    Title TEXT NOT NULL,
-                    Author TEXT NOT NULL,
-                    ISBN TEXT UNIQUE NOT NULL,
-                    Category TEXT NOT NULL,
-                    TotalCopies INTEGER NOT NULL,
-                    AvailableCopies INTEGER NOT NULL,
-                    AddedDate TEXT NOT NULL,
-                    YearPublished INTEGER,
-                    Description TEXT
-                );
+                // Migrate Student passwords
+                using var studentCmd = new MySqlCommand("SELECT Id, Password FROM Students", conn);
+                using var studentReader = studentCmd.ExecuteReader();
+                var studentUpdates = new List<(int Id, string Password)>();
+                while (studentReader.Read())
+                {
+                    var id = studentReader.GetInt32(0);
+                    var password = studentReader.GetString(1);
+                    // Check if password is already hashed
+                    if (password.Length < 40 || password == "admin123" || password == "pass")
+                    {
+                        studentUpdates.Add((id, password));
+                    }
+                }
+                studentReader.Close();
 
-                CREATE TABLE IF NOT EXISTS BorrowRecords (
-                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    StudentId INTEGER NOT NULL,
-                    BookId INTEGER NOT NULL,
-                    IssueDate TEXT NOT NULL,
-                    DueDate TEXT NOT NULL,
-                    ReturnDate TEXT,
-                    Status TEXT NOT NULL,
-                    FineAmount REAL
-                );
-
-                CREATE TABLE IF NOT EXISTS Reservations (
-                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    StudentId INTEGER NOT NULL,
-                    BookId INTEGER NOT NULL,
-                    ReservationDate TEXT NOT NULL,
-                    HoldUntilDate TEXT,
-                    Status TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS Announcements (
-                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    Title TEXT NOT NULL,
-                    Content TEXT NOT NULL,
-                    CreatedDate TEXT NOT NULL,
-                    IsActive INTEGER NOT NULL DEFAULT 1
-                );
-
-                CREATE TABLE IF NOT EXISTS PasswordResets (
-                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    StudentId INTEGER NOT NULL,
-                    Code TEXT NOT NULL,
-                    ExpiresAt TEXT NOT NULL,
-                    CreatedAt TEXT NOT NULL
-                );
-            ";
-
-            using var cmd = new SqliteCommand(createTables, conn);
-            cmd.ExecuteNonQuery();
+                foreach (var (id, plainPassword) in studentUpdates)
+                {
+                    using var updateCmd = new MySqlCommand("UPDATE Students SET Password = @password WHERE Id = @id", conn);
+                    updateCmd.Parameters.AddWithValue("@id", id);
+                    updateCmd.Parameters.AddWithValue("@password", PasswordHelper.HashPassword(plainPassword));
+                    updateCmd.ExecuteNonQuery();
+                }
+            }
+            catch
+            {
+                // Silently fail migration - passwords might already be hashed or table might not exist yet
+            }
         }
 
         private static void SeedAccountDefaults()
         {
-            using var conn = new SqliteConnection(GetConnectionString());
+            using var conn = new MySqlConnection(GetConnectionString());
             conn.Open();
 
             // Insert default admin
-            using var adminCmd = new SqliteCommand(
-                "INSERT INTO Admins (Email, Password, FullName, CreatedAt) VALUES (@email, @password, @fullName, @createdAt)",
+            using var adminCmd = new MySqlCommand(
+                "INSERT IGNORE INTO Admins (Email, Password, FullName, CreatedAt) VALUES (@email, @password, @fullName, @createdAt)",
                 conn);
             adminCmd.Parameters.AddWithValue("@email", "libraryadmin@gmail.com");
-            adminCmd.Parameters.AddWithValue("@password", "admin123");
+            adminCmd.Parameters.AddWithValue("@password", PasswordHelper.HashPassword("admin123"));
             adminCmd.Parameters.AddWithValue("@fullName", "Library Administrator");
-            adminCmd.Parameters.AddWithValue("@createdAt", DateTime.Now.ToString("O"));
+            adminCmd.Parameters.AddWithValue("@createdAt", DateTime.Now);
             adminCmd.ExecuteNonQuery();
 
             // Insert default student
-            using var studentCmd = new SqliteCommand(
-                "INSERT INTO Students (StudentId, FullName, Email, Password, Course, Section, CreatedAt, IsActive) VALUES (@studentId, @fullName, @email, @password, @course, @section, @createdAt, @isActive)",
+            using var studentCmd = new MySqlCommand(
+                "INSERT IGNORE INTO Students (StudentId, FullName, Email, Password, Course, Section, CreatedAt, IsActive) VALUES (@studentId, @fullName, @email, @password, @course, @section, @createdAt, @isActive)",
                 conn);
             studentCmd.Parameters.AddWithValue("@studentId", "S1001");
             studentCmd.Parameters.AddWithValue("@fullName", "Test Student");
             studentCmd.Parameters.AddWithValue("@email", "student@example.com");
-            studentCmd.Parameters.AddWithValue("@password", "pass");
+            studentCmd.Parameters.AddWithValue("@password", PasswordHelper.HashPassword("pass"));
             studentCmd.Parameters.AddWithValue("@course", "Computer Science");
             studentCmd.Parameters.AddWithValue("@section", "A");
-            studentCmd.Parameters.AddWithValue("@createdAt", DateTime.Now.ToString("O"));
+            studentCmd.Parameters.AddWithValue("@createdAt", DateTime.Now);
             studentCmd.Parameters.AddWithValue("@isActive", 1);
             studentCmd.ExecuteNonQuery();
         }
@@ -186,37 +166,37 @@ namespace LibrarySystem
                 var ds = JsonSerializer.Deserialize<AccountStore>(json);
                 if (ds == null) return;
 
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
 
                 // Migrate Admins
                 foreach (var admin in ds.Admins ?? new List<Admin>())
                 {
-                    using var cmd = new SqliteCommand(
-                        "INSERT OR IGNORE INTO Admins (Id, Email, Password, FullName, CreatedAt) VALUES (@id, @email, @password, @fullName, @createdAt)",
+                    using var cmd = new MySqlCommand(
+                        "INSERT IGNORE INTO Admins (Id, Email, Password, FullName, CreatedAt) VALUES (@id, @email, @password, @fullName, @createdAt)",
                         conn);
                     cmd.Parameters.AddWithValue("@id", admin.Id);
                     cmd.Parameters.AddWithValue("@email", admin.Email);
-                    cmd.Parameters.AddWithValue("@password", admin.Password);
+                    cmd.Parameters.AddWithValue("@password", PasswordHelper.HashPassword(admin.Password));
                     cmd.Parameters.AddWithValue("@fullName", admin.FullName);
-                    cmd.Parameters.AddWithValue("@createdAt", admin.CreatedAt.ToString("O"));
+                    cmd.Parameters.AddWithValue("@createdAt", admin.CreatedAt);
                     cmd.ExecuteNonQuery();
                 }
 
                 // Migrate Students
                 foreach (var student in ds.Students ?? new List<Student>())
                 {
-                    using var cmd = new SqliteCommand(
-                        "INSERT OR IGNORE INTO Students (Id, StudentId, FullName, Email, Password, Course, Section, CreatedAt, IsActive) VALUES (@id, @studentId, @fullName, @email, @password, @course, @section, @createdAt, @isActive)",
+                    using var cmd = new MySqlCommand(
+                        "INSERT IGNORE INTO Students (Id, StudentId, FullName, Email, Password, Course, Section, CreatedAt, IsActive) VALUES (@id, @studentId, @fullName, @email, @password, @course, @section, @createdAt, @isActive)",
                         conn);
                     cmd.Parameters.AddWithValue("@id", student.Id);
                     cmd.Parameters.AddWithValue("@studentId", student.StudentId);
                     cmd.Parameters.AddWithValue("@fullName", student.FullName);
                     cmd.Parameters.AddWithValue("@email", student.Email);
-                    cmd.Parameters.AddWithValue("@password", student.Password);
+                    cmd.Parameters.AddWithValue("@password", PasswordHelper.HashPassword(student.Password));
                     cmd.Parameters.AddWithValue("@course", student.Course);
                     cmd.Parameters.AddWithValue("@section", student.Section);
-                    cmd.Parameters.AddWithValue("@createdAt", student.CreatedAt.ToString("O"));
+                    cmd.Parameters.AddWithValue("@createdAt", student.CreatedAt);
                     cmd.Parameters.AddWithValue("@isActive", student.IsActive ? 1 : 0);
                     cmd.ExecuteNonQuery();
                 }
@@ -224,14 +204,14 @@ namespace LibrarySystem
                 // Migrate PasswordResets
                 foreach (var pr in ds.PasswordResets ?? new List<PasswordReset>())
                 {
-                    using var cmd = new SqliteCommand(
-                        "INSERT OR IGNORE INTO PasswordResets (Id, StudentId, Code, ExpiresAt, CreatedAt) VALUES (@id, @studentId, @code, @expiresAt, @createdAt)",
+                    using var cmd = new MySqlCommand(
+                        "INSERT IGNORE INTO PasswordResets (Id, StudentId, Code, ExpiresAt, CreatedAt) VALUES (@id, @studentId, @code, @expiresAt, @createdAt)",
                         conn);
                     cmd.Parameters.AddWithValue("@id", pr.Id);
                     cmd.Parameters.AddWithValue("@studentId", pr.StudentId);
                     cmd.Parameters.AddWithValue("@code", pr.Code);
-                    cmd.Parameters.AddWithValue("@expiresAt", pr.ExpiresAt.ToString("O"));
-                    cmd.Parameters.AddWithValue("@createdAt", pr.CreatedAt.ToString("O"));
+                    cmd.Parameters.AddWithValue("@expiresAt", pr.ExpiresAt);
+                    cmd.Parameters.AddWithValue("@createdAt", pr.CreatedAt);
                     cmd.ExecuteNonQuery();
                 }
             }
@@ -240,7 +220,7 @@ namespace LibrarySystem
 
         private static void SeedBooksDefaults()
         {
-            using var conn = new SqliteConnection(GetConnectionString());
+            using var conn = new MySqlConnection(GetConnectionString());
             conn.Open();
 
             var books = new List<Book>
@@ -292,9 +272,6 @@ namespace LibrarySystem
                 new Book { Title = "Assessment and Evaluation", Author = "Philip Yang", ISBN = "COED-0020", Category = "College of Education", TotalCopies = 3, AvailableCopies = 3, AddedDate = DateTime.Now, YearPublished = 2017, Description = "Evaluating student learning outcomes." }
             };
 
-            Books.AddRange(coedList);
-
-
             // Engineering: 20 books
             var coeList = new List<Book>
             {
@@ -319,9 +296,6 @@ namespace LibrarySystem
                 new Book { Title = "Instrumentation and Measurement", Author = "Quinn Torres", ISBN = "COE-0019", Category = "College of Engineering", TotalCopies = 3, AvailableCopies = 3, AddedDate = DateTime.Now, YearPublished = 2016, Description = "Measurement systems and sensors." },
                 new Book { Title = "Renewable Energy Systems", Author = "Harold Green", ISBN = "COE-0020", Category = "College of Engineering", TotalCopies = 2, AvailableCopies = 2, AddedDate = DateTime.Now, YearPublished = 2022, Description = "Solar, wind, and eco-friendly systems." }
             };
-
-            Books.AddRange(coeList);
-
 
             // Business & Accountancy: 20 books
             var cbaList = new List<Book>
@@ -356,8 +330,8 @@ namespace LibrarySystem
             // Insert all books into database
             foreach (var book in books)
             {
-                using var cmd = new SqliteCommand(
-                    "INSERT INTO Books (Title, Author, ISBN, Category, TotalCopies, AvailableCopies, AddedDate, YearPublished, Description) VALUES (@title, @author, @isbn, @category, @totalCopies, @availableCopies, @addedDate, @yearPublished, @description)",
+                using var cmd = new MySqlCommand(
+                    "INSERT IGNORE INTO Books (Title, Author, ISBN, Category, TotalCopies, AvailableCopies, AddedDate, YearPublished, Description) VALUES (@title, @author, @isbn, @category, @totalCopies, @availableCopies, @addedDate, @yearPublished, @description)",
                     conn);
                 cmd.Parameters.AddWithValue("@title", book.Title);
                 cmd.Parameters.AddWithValue("@author", book.Author);
@@ -365,9 +339,9 @@ namespace LibrarySystem
                 cmd.Parameters.AddWithValue("@category", book.Category);
                 cmd.Parameters.AddWithValue("@totalCopies", book.TotalCopies);
                 cmd.Parameters.AddWithValue("@availableCopies", book.AvailableCopies);
-                cmd.Parameters.AddWithValue("@addedDate", book.AddedDate.ToString("O"));
+                cmd.Parameters.AddWithValue("@addedDate", book.AddedDate);
                 cmd.Parameters.AddWithValue("@yearPublished", book.YearPublished.HasValue ? (object)book.YearPublished.Value : DBNull.Value);
-                cmd.Parameters.AddWithValue("@description", book.Description);
+                cmd.Parameters.AddWithValue("@description", book.Description ?? string.Empty);
                 cmd.ExecuteNonQuery();
             }
         }
@@ -392,44 +366,6 @@ namespace LibrarySystem
             public DateTime ExpiresAt { get; set; }
             public DateTime CreatedAt { get; set; }
         }
-            catch
-            {
-                // ignore
-            }
-        }
-
-        private static bool LoadAccountsFromFile_NoLock()
-        {
-            try
-            {
-                if (!File.Exists(AccountsFile)) return false;
-                var json = File.ReadAllText(AccountsFile);
-                var ds = JsonSerializer.Deserialize<AccountStore>(json);
-                if (ds == null) return false;
-
-                Students.Clear(); Students.AddRange(ds.Students ?? new List<Student>());
-                Admins.Clear(); Admins.AddRange(ds.Admins ?? new List<Admin>());
-
-                PasswordResets.Clear();
-                if (ds.PasswordResets != null)
-                {
-                    foreach (var p in ds.PasswordResets)
-                    {
-                        PasswordResets.Add(new PasswordReset { Id = p.Id, StudentId = p.StudentId, Code = p.Code, ExpiresAt = p.ExpiresAt, CreatedAt = p.CreatedAt });
-                    }
-                }
-
-                _studentId = ds.StudentId == 0 ? (Students.Any() ? Students.Max(s => s.Id) + 1 : 1) : ds.StudentId;
-                _adminId = ds.AdminId == 0 ? (Admins.Any() ? Admins.Max(a => a.Id) + 1 : 1) : ds.AdminId;
-                _passwordResetId = ds.PasswordResetId == 0 ? (PasswordResets.Any() ? PasswordResets.Max(p => p.Id) + 1 : 1) : ds.PasswordResetId;
-
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
-        }
 
         // Public API implementations (books, students, borrows, reservations, announcements, password resets, stats)
 
@@ -437,16 +373,16 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
 
                 // Check if ISBN already exists
-                using var checkCmd = new SqliteCommand("SELECT COUNT(*) FROM Books WHERE ISBN = @isbn", conn);
+                using var checkCmd = new MySqlCommand("SELECT COUNT(*) FROM Books WHERE ISBN = @isbn", conn);
                 checkCmd.Parameters.AddWithValue("@isbn", book.ISBN);
                 if (Convert.ToInt32(checkCmd.ExecuteScalar()) > 0) return false;
 
-                using var cmd = new SqliteCommand(
-                    "INSERT INTO Books (Title, Author, ISBN, Category, TotalCopies, AvailableCopies, AddedDate, YearPublished, Description) VALUES (@title, @author, @isbn, @category, @totalCopies, @availableCopies, @addedDate, @yearPublished, @description); SELECT last_insert_rowid();",
+                using var cmd = new MySqlCommand(
+                    "INSERT INTO Books (Title, Author, ISBN, Category, TotalCopies, AvailableCopies, AddedDate, YearPublished, Description) VALUES (@title, @author, @isbn, @category, @totalCopies, @availableCopies, @addedDate, @yearPublished, @description); SELECT LAST_INSERT_ID();",
                     conn);
                 cmd.Parameters.AddWithValue("@title", book.Title);
                 cmd.Parameters.AddWithValue("@author", book.Author);
@@ -454,9 +390,9 @@ namespace LibrarySystem
                 cmd.Parameters.AddWithValue("@category", book.Category);
                 cmd.Parameters.AddWithValue("@totalCopies", book.TotalCopies);
                 cmd.Parameters.AddWithValue("@availableCopies", book.AvailableCopies);
-                cmd.Parameters.AddWithValue("@addedDate", DateTime.Now.ToString("O"));
+                cmd.Parameters.AddWithValue("@addedDate", DateTime.Now);
                 cmd.Parameters.AddWithValue("@yearPublished", book.YearPublished.HasValue ? (object)book.YearPublished.Value : DBNull.Value);
-                cmd.Parameters.AddWithValue("@description", book.Description);
+                cmd.Parameters.AddWithValue("@description", book.Description ?? string.Empty);
                 book.Id = Convert.ToInt32(cmd.ExecuteScalar());
             }
             OnDataChanged();
@@ -468,9 +404,9 @@ namespace LibrarySystem
             lock (_lock)
             {
                 var books = new List<Book>();
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("SELECT * FROM Books ORDER BY Title", conn);
+                using var cmd = new MySqlCommand("SELECT * FROM Books ORDER BY Title", conn);
                 using var reader = cmd.ExecuteReader();
                 while (reader.Read())
                 {
@@ -484,9 +420,9 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("SELECT * FROM Books WHERE Id = @id", conn);
+                using var cmd = new MySqlCommand("SELECT * FROM Books WHERE Id = @id", conn);
                 cmd.Parameters.AddWithValue("@id", id);
                 using var reader = cmd.ExecuteReader();
                 if (reader.Read())
@@ -501,9 +437,9 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand(
+                using var cmd = new MySqlCommand(
                     "UPDATE Books SET Title = @title, Author = @author, ISBN = @isbn, Category = @category, TotalCopies = @totalCopies, AvailableCopies = @availableCopies, YearPublished = @yearPublished, Description = @description WHERE Id = @id",
                     conn);
                 cmd.Parameters.AddWithValue("@id", book.Id);
@@ -529,9 +465,9 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("DELETE FROM Books WHERE Id = @id", conn);
+                using var cmd = new MySqlCommand("DELETE FROM Books WHERE Id = @id", conn);
                 cmd.Parameters.AddWithValue("@id", id);
                 var rowsAffected = cmd.ExecuteNonQuery();
                 if (rowsAffected > 0)
@@ -543,7 +479,7 @@ namespace LibrarySystem
             }
         }
 
-        private static Book ReadBook(SqliteDataReader reader)
+        private static Book ReadBook(MySqlDataReader reader)
         {
             return new Book
             {
@@ -554,7 +490,7 @@ namespace LibrarySystem
                 Category = reader.GetString(4),
                 TotalCopies = reader.GetInt32(5),
                 AvailableCopies = reader.GetInt32(6),
-                AddedDate = DateTime.Parse(reader.GetString(7)),
+                AddedDate = reader.GetDateTime(7),
                 YearPublished = reader.IsDBNull(8) ? null : reader.GetInt32(8),
                 Description = reader.IsDBNull(9) ? string.Empty : reader.GetString(9)
             };
@@ -565,11 +501,11 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
 
                 // Check if email or studentId already exists
-                using var checkCmd = new SqliteCommand("SELECT COUNT(*) FROM Students WHERE Email = @email OR StudentId = @studentId", conn);
+                using var checkCmd = new MySqlCommand("SELECT COUNT(*) FROM Students WHERE Email = @email OR StudentId = @studentId", conn);
                 checkCmd.Parameters.AddWithValue("@email", student.Email);
                 checkCmd.Parameters.AddWithValue("@studentId", student.StudentId);
                 if (Convert.ToInt32(checkCmd.ExecuteScalar()) > 0) return false;
@@ -577,28 +513,26 @@ namespace LibrarySystem
                 if (string.IsNullOrWhiteSpace(student.StudentId))
                 {
                     // Get next student ID
-                    using var maxCmd = new SqliteCommand("SELECT COALESCE(MAX(Id), 0) FROM Students", conn);
+                    using var maxCmd = new MySqlCommand("SELECT COALESCE(MAX(Id), 0) FROM Students", conn);
                     var maxId = Convert.ToInt32(maxCmd.ExecuteScalar());
                     student.StudentId = "S" + (maxId + 1).ToString("D4");
                 }
 
-                using var cmd = new SqliteCommand(
-                    "INSERT INTO Students (StudentId, FullName, Email, Password, Course, Section, CreatedAt, IsActive) VALUES (@studentId, @fullName, @email, @password, @course, @section, @createdAt, @isActive); SELECT last_insert_rowid();",
+                using var cmd = new MySqlCommand(
+                    "INSERT INTO Students (StudentId, FullName, Email, Password, Course, Section, CreatedAt, IsActive) VALUES (@studentId, @fullName, @email, @password, @course, @section, @createdAt, @isActive); SELECT LAST_INSERT_ID();",
                     conn);
                 cmd.Parameters.AddWithValue("@studentId", student.StudentId);
                 cmd.Parameters.AddWithValue("@fullName", student.FullName);
                 cmd.Parameters.AddWithValue("@email", student.Email);
-                cmd.Parameters.AddWithValue("@password", student.Password);
+                cmd.Parameters.AddWithValue("@password", PasswordHelper.HashPassword(student.Password));
                 cmd.Parameters.AddWithValue("@course", student.Course);
                 cmd.Parameters.AddWithValue("@section", student.Section);
-                cmd.Parameters.AddWithValue("@createdAt", DateTime.Now.ToString("O"));
+                cmd.Parameters.AddWithValue("@createdAt", DateTime.Now);
                 cmd.Parameters.AddWithValue("@isActive", 1);
                 student.Id = Convert.ToInt32(cmd.ExecuteScalar());
                 student.CreatedAt = DateTime.Now;
                 student.IsActive = true;
                 if (string.IsNullOrWhiteSpace(student.StudentId)) student.StudentId = "S" + student.Id.ToString("D4");
-                Students.Add(student);
-                SaveAccountsToFile_NoLock();
             }
             OnDataChanged();
             return true;
@@ -608,9 +542,9 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("SELECT * FROM Students WHERE Email = @emailOrId OR StudentId = @emailOrId", conn);
+                using var cmd = new MySqlCommand("SELECT * FROM Students WHERE Email = @emailOrId OR StudentId = @emailOrId", conn);
                 cmd.Parameters.AddWithValue("@emailOrId", emailOrId);
                 using var reader = cmd.ExecuteReader();
                 if (reader.Read())
@@ -625,9 +559,9 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("SELECT * FROM Students WHERE Id = @id", conn);
+                using var cmd = new MySqlCommand("SELECT * FROM Students WHERE Id = @id", conn);
                 cmd.Parameters.AddWithValue("@id", id);
                 using var reader = cmd.ExecuteReader();
                 if (reader.Read())
@@ -643,9 +577,9 @@ namespace LibrarySystem
             lock (_lock)
             {
                 var students = new List<Student>();
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("SELECT * FROM Students", conn);
+                using var cmd = new MySqlCommand("SELECT * FROM Students", conn);
                 using var reader = cmd.ExecuteReader();
                 while (reader.Read())
                 {
@@ -659,16 +593,16 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand(
+                using var cmd = new MySqlCommand(
                     "UPDATE Students SET StudentId = @studentId, FullName = @fullName, Email = @email, Password = @password, Course = @course, Section = @section, IsActive = @isActive WHERE Id = @id",
                     conn);
                 cmd.Parameters.AddWithValue("@id", student.Id);
                 cmd.Parameters.AddWithValue("@studentId", student.StudentId);
                 cmd.Parameters.AddWithValue("@fullName", student.FullName);
                 cmd.Parameters.AddWithValue("@email", student.Email);
-                cmd.Parameters.AddWithValue("@password", student.Password);
+                cmd.Parameters.AddWithValue("@password", PasswordHelper.HashPassword(student.Password));
                 cmd.Parameters.AddWithValue("@course", student.Course);
                 cmd.Parameters.AddWithValue("@section", student.Section);
                 cmd.Parameters.AddWithValue("@isActive", student.IsActive ? 1 : 0);
@@ -686,11 +620,11 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("UPDATE Students SET Password = @password WHERE Id = @id", conn);
+                using var cmd = new MySqlCommand("UPDATE Students SET Password = @password WHERE Id = @id", conn);
                 cmd.Parameters.AddWithValue("@id", studentId);
-                cmd.Parameters.AddWithValue("@password", newPassword);
+                cmd.Parameters.AddWithValue("@password", PasswordHelper.HashPassword(newPassword));
                 var rowsAffected = cmd.ExecuteNonQuery();
                 if (rowsAffected > 0)
                 {
@@ -705,9 +639,9 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("SELECT * FROM Admins WHERE Email = @email", conn);
+                using var cmd = new MySqlCommand("SELECT * FROM Admins WHERE Email = @email", conn);
                 cmd.Parameters.AddWithValue("@email", email);
                 using var reader = cmd.ExecuteReader();
                 if (reader.Read())
@@ -718,7 +652,7 @@ namespace LibrarySystem
             }
         }
 
-        private static Student ReadStudent(SqliteDataReader reader)
+        private static Student ReadStudent(MySqlDataReader reader)
         {
             return new Student
             {
@@ -729,12 +663,12 @@ namespace LibrarySystem
                 Password = reader.GetString(4),
                 Course = reader.GetString(5),
                 Section = reader.GetString(6),
-                CreatedAt = DateTime.Parse(reader.GetString(7)),
+                CreatedAt = reader.GetDateTime(7),
                 IsActive = reader.GetInt32(8) == 1
             };
         }
 
-        private static Admin ReadAdmin(SqliteDataReader reader)
+        private static Admin ReadAdmin(MySqlDataReader reader)
         {
             return new Admin
             {
@@ -742,7 +676,7 @@ namespace LibrarySystem
                 Email = reader.GetString(1),
                 Password = reader.GetString(2),
                 FullName = reader.GetString(3),
-                CreatedAt = DateTime.Parse(reader.GetString(4))
+                CreatedAt = reader.GetDateTime(4)
             };
         }
 
@@ -751,28 +685,28 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
 
                 // Check if book exists and has available copies
-                using var checkCmd = new SqliteCommand("SELECT AvailableCopies FROM Books WHERE Id = @id", conn);
+                using var checkCmd = new MySqlCommand("SELECT AvailableCopies FROM Books WHERE Id = @id", conn);
                 checkCmd.Parameters.AddWithValue("@id", bookId);
                 var result = checkCmd.ExecuteScalar();
                 if (result == null || Convert.ToInt32(result) <= 0) return false;
 
                 // Decrease available copies
-                using var updateCmd = new SqliteCommand("UPDATE Books SET AvailableCopies = AvailableCopies - 1 WHERE Id = @id", conn);
+                using var updateCmd = new MySqlCommand("UPDATE Books SET AvailableCopies = AvailableCopies - 1 WHERE Id = @id", conn);
                 updateCmd.Parameters.AddWithValue("@id", bookId);
                 updateCmd.ExecuteNonQuery();
 
                 // Insert borrow record
-                using var cmd = new SqliteCommand(
-                    "INSERT INTO BorrowRecords (StudentId, BookId, IssueDate, DueDate, ReturnDate, Status, FineAmount) VALUES (@studentId, @bookId, @issueDate, @dueDate, @returnDate, @status, @fineAmount); SELECT last_insert_rowid();",
+                using var cmd = new MySqlCommand(
+                    "INSERT INTO BorrowRecords (StudentId, BookId, IssueDate, DueDate, ReturnDate, Status, FineAmount) VALUES (@studentId, @bookId, @issueDate, @dueDate, @returnDate, @status, @fineAmount); SELECT LAST_INSERT_ID();",
                     conn);
                 cmd.Parameters.AddWithValue("@studentId", studentId);
                 cmd.Parameters.AddWithValue("@bookId", bookId);
-                cmd.Parameters.AddWithValue("@issueDate", DateTime.Now.ToString("O"));
-                cmd.Parameters.AddWithValue("@dueDate", DateTime.Now.AddDays(daysToReturn).ToString("O"));
+                cmd.Parameters.AddWithValue("@issueDate", DateTime.Now);
+                cmd.Parameters.AddWithValue("@dueDate", DateTime.Now.AddDays(daysToReturn));
                 cmd.Parameters.AddWithValue("@returnDate", DBNull.Value);
                 cmd.Parameters.AddWithValue("@status", "Issued");
                 cmd.Parameters.AddWithValue("@fineAmount", DBNull.Value);
@@ -786,11 +720,11 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
 
                 // Get the borrow record
-                using var getCmd = new SqliteCommand("SELECT BookId, Status FROM BorrowRecords WHERE Id = @id", conn);
+                using var getCmd = new MySqlCommand("SELECT BookId, Status FROM BorrowRecords WHERE Id = @id", conn);
                 getCmd.Parameters.AddWithValue("@id", recordId);
                 using var reader = getCmd.ExecuteReader();
                 if (!reader.Read() || reader.GetString(1) != "Issued") return false;
@@ -798,16 +732,16 @@ namespace LibrarySystem
                 reader.Close();
 
                 // Update borrow record
-                using var updateCmd = new SqliteCommand(
+                using var updateCmd = new MySqlCommand(
                     "UPDATE BorrowRecords SET ReturnDate = @returnDate, Status = @status WHERE Id = @id",
                     conn);
                 updateCmd.Parameters.AddWithValue("@id", recordId);
-                updateCmd.Parameters.AddWithValue("@returnDate", DateTime.Now.ToString("O"));
+                updateCmd.Parameters.AddWithValue("@returnDate", DateTime.Now);
                 updateCmd.Parameters.AddWithValue("@status", "Returned");
                 updateCmd.ExecuteNonQuery();
 
                 // Increase available copies
-                using var bookCmd = new SqliteCommand("UPDATE Books SET AvailableCopies = AvailableCopies + 1 WHERE Id = @id", conn);
+                using var bookCmd = new MySqlCommand("UPDATE Books SET AvailableCopies = AvailableCopies + 1 WHERE Id = @id", conn);
                 bookCmd.Parameters.AddWithValue("@id", bookId);
                 bookCmd.ExecuteNonQuery();
             }
@@ -819,21 +753,21 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
 
                 // Get current due date
-                using var getCmd = new SqliteCommand("SELECT DueDate, Status FROM BorrowRecords WHERE Id = @id", conn);
+                using var getCmd = new MySqlCommand("SELECT DueDate, Status FROM BorrowRecords WHERE Id = @id", conn);
                 getCmd.Parameters.AddWithValue("@id", recordId);
                 using var reader = getCmd.ExecuteReader();
                 if (!reader.Read() || reader.GetString(1) != "Issued") return false;
-                var currentDueDate = DateTime.Parse(reader.GetString(0));
+                var currentDueDate = reader.GetDateTime(0);
                 reader.Close();
 
                 // Update due date
-                using var cmd = new SqliteCommand("UPDATE BorrowRecords SET DueDate = @dueDate WHERE Id = @id", conn);
+                using var cmd = new MySqlCommand("UPDATE BorrowRecords SET DueDate = @dueDate WHERE Id = @id", conn);
                 cmd.Parameters.AddWithValue("@id", recordId);
-                cmd.Parameters.AddWithValue("@dueDate", currentDueDate.AddDays(additionalDays).ToString("O"));
+                cmd.Parameters.AddWithValue("@dueDate", currentDueDate.AddDays(additionalDays));
                 var rowsAffected = cmd.ExecuteNonQuery();
                 if (rowsAffected > 0)
                 {
@@ -849,9 +783,9 @@ namespace LibrarySystem
             lock (_lock)
             {
                 var records = new List<BorrowRecord>();
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("SELECT * FROM BorrowRecords ORDER BY IssueDate DESC", conn);
+                using var cmd = new MySqlCommand("SELECT * FROM BorrowRecords ORDER BY IssueDate DESC", conn);
                 using var reader = cmd.ExecuteReader();
                 while (reader.Read())
                 {
@@ -866,9 +800,9 @@ namespace LibrarySystem
             lock (_lock)
             {
                 var records = new List<BorrowRecord>();
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("SELECT * FROM BorrowRecords WHERE StudentId = @studentId ORDER BY IssueDate DESC", conn);
+                using var cmd = new MySqlCommand("SELECT * FROM BorrowRecords WHERE StudentId = @studentId ORDER BY IssueDate DESC", conn);
                 cmd.Parameters.AddWithValue("@studentId", studentId);
                 using var reader = cmd.ExecuteReader();
                 while (reader.Read())
@@ -884,9 +818,9 @@ namespace LibrarySystem
             lock (_lock)
             {
                 var records = new List<BorrowRecord>();
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("SELECT * FROM BorrowRecords WHERE Status = 'Issued' AND date(DueDate) < date('now') ORDER BY DueDate", conn);
+                using var cmd = new MySqlCommand("SELECT * FROM BorrowRecords WHERE Status = 'Issued' AND DATE(DueDate) < CURDATE() ORDER BY DueDate", conn);
                 using var reader = cmd.ExecuteReader();
                 while (reader.Read())
                 {
@@ -900,9 +834,9 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("SELECT * FROM BorrowRecords WHERE Id = @id", conn);
+                using var cmd = new MySqlCommand("SELECT * FROM BorrowRecords WHERE Id = @id", conn);
                 cmd.Parameters.AddWithValue("@id", recordId);
                 using var reader = cmd.ExecuteReader();
                 if (reader.Read())
@@ -913,16 +847,16 @@ namespace LibrarySystem
             }
         }
 
-        private static BorrowRecord ReadBorrowRecord(SqliteDataReader reader)
+        private static BorrowRecord ReadBorrowRecord(MySqlDataReader reader)
         {
             return new BorrowRecord
             {
                 Id = reader.GetInt32(0),
                 StudentId = reader.GetInt32(1),
                 BookId = reader.GetInt32(2),
-                IssueDate = DateTime.Parse(reader.GetString(3)),
-                DueDate = DateTime.Parse(reader.GetString(4)),
-                ReturnDate = reader.IsDBNull(5) ? null : DateTime.Parse(reader.GetString(5)),
+                IssueDate = reader.GetDateTime(3),
+                DueDate = reader.GetDateTime(4),
+                ReturnDate = reader.IsDBNull(5) ? null : reader.GetDateTime(5),
                 Status = reader.GetString(6),
                 FineAmount = reader.IsDBNull(7) ? null : reader.GetDecimal(7)
             };
@@ -933,11 +867,11 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
 
                 // Check if reservation already exists
-                using var checkCmd = new SqliteCommand(
+                using var checkCmd = new MySqlCommand(
                     "SELECT COUNT(*) FROM Reservations WHERE StudentId = @studentId AND BookId = @bookId AND Status NOT IN ('Cancelled', 'Completed')",
                     conn);
                 checkCmd.Parameters.AddWithValue("@studentId", studentId);
@@ -945,18 +879,18 @@ namespace LibrarySystem
                 if (Convert.ToInt32(checkCmd.ExecuteScalar()) > 0) return false;
 
                 // Check if book is available
-                using var bookCmd = new SqliteCommand("SELECT AvailableCopies FROM Books WHERE Id = @id", conn);
+                using var bookCmd = new MySqlCommand("SELECT AvailableCopies FROM Books WHERE Id = @id", conn);
                 bookCmd.Parameters.AddWithValue("@id", bookId);
                 var availableCopies = Convert.ToInt32(bookCmd.ExecuteScalar());
                 var status = availableCopies > 0 ? "Ready" : "Pending";
 
-                using var cmd = new SqliteCommand(
-                    "INSERT INTO Reservations (StudentId, BookId, ReservationDate, HoldUntilDate, Status) VALUES (@studentId, @bookId, @reservationDate, @holdUntilDate, @status); SELECT last_insert_rowid();",
+                using var cmd = new MySqlCommand(
+                    "INSERT INTO Reservations (StudentId, BookId, ReservationDate, HoldUntilDate, Status) VALUES (@studentId, @bookId, @reservationDate, @holdUntilDate, @status); SELECT LAST_INSERT_ID();",
                     conn);
                 cmd.Parameters.AddWithValue("@studentId", studentId);
                 cmd.Parameters.AddWithValue("@bookId", bookId);
-                cmd.Parameters.AddWithValue("@reservationDate", DateTime.Now.ToString("O"));
-                cmd.Parameters.AddWithValue("@holdUntilDate", DateTime.Now.AddDays(7).ToString("O"));
+                cmd.Parameters.AddWithValue("@reservationDate", DateTime.Now);
+                cmd.Parameters.AddWithValue("@holdUntilDate", DateTime.Now.AddDays(7));
                 cmd.Parameters.AddWithValue("@status", status);
                 cmd.ExecuteScalar();
             }
@@ -969,9 +903,9 @@ namespace LibrarySystem
             lock (_lock)
             {
                 var reservations = new List<Reservation>();
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand(
+                using var cmd = new MySqlCommand(
                     "SELECT * FROM Reservations WHERE StudentId = @studentId AND Status NOT IN ('Cancelled', 'Completed') ORDER BY ReservationDate DESC",
                     conn);
                 cmd.Parameters.AddWithValue("@studentId", studentId);
@@ -988,9 +922,9 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand(
+                using var cmd = new MySqlCommand(
                     "SELECT COUNT(*) FROM Reservations WHERE StudentId = @studentId AND BookId = @bookId AND Status NOT IN ('Cancelled', 'Completed')",
                     conn);
                 cmd.Parameters.AddWithValue("@studentId", studentId);
@@ -1003,9 +937,9 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("UPDATE Reservations SET Status = 'Cancelled' WHERE Id = @id", conn);
+                using var cmd = new MySqlCommand("UPDATE Reservations SET Status = 'Cancelled' WHERE Id = @id", conn);
                 cmd.Parameters.AddWithValue("@id", reservationId);
                 var rowsAffected = cmd.ExecuteNonQuery();
                 if (rowsAffected > 0)
@@ -1021,11 +955,11 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
 
                 // Get reservation
-                using var getCmd = new SqliteCommand("SELECT StudentId, BookId, Status FROM Reservations WHERE Id = @id", conn);
+                using var getCmd = new MySqlCommand("SELECT StudentId, BookId, Status FROM Reservations WHERE Id = @id", conn);
                 getCmd.Parameters.AddWithValue("@id", reservationId);
                 using var reader = getCmd.ExecuteReader();
                 if (!reader.Read() || reader.GetString(2) != "Ready") return false;
@@ -1034,29 +968,29 @@ namespace LibrarySystem
                 reader.Close();
 
                 // Issue the book (inline logic to avoid nested lock)
-                using var checkCmd = new SqliteCommand("SELECT AvailableCopies FROM Books WHERE Id = @id", conn);
+                using var checkCmd = new MySqlCommand("SELECT AvailableCopies FROM Books WHERE Id = @id", conn);
                 checkCmd.Parameters.AddWithValue("@id", bookId);
                 var result = checkCmd.ExecuteScalar();
                 if (result == null || Convert.ToInt32(result) <= 0) return false;
 
-                using var updateCmd = new SqliteCommand("UPDATE Books SET AvailableCopies = AvailableCopies - 1 WHERE Id = @id", conn);
+                using var updateCmd = new MySqlCommand("UPDATE Books SET AvailableCopies = AvailableCopies - 1 WHERE Id = @id", conn);
                 updateCmd.Parameters.AddWithValue("@id", bookId);
                 updateCmd.ExecuteNonQuery();
 
-                using var borrowCmd = new SqliteCommand(
+                using var borrowCmd = new MySqlCommand(
                     "INSERT INTO BorrowRecords (StudentId, BookId, IssueDate, DueDate, ReturnDate, Status, FineAmount) VALUES (@studentId, @bookId, @issueDate, @dueDate, @returnDate, @status, @fineAmount)",
                     conn);
                 borrowCmd.Parameters.AddWithValue("@studentId", studentId);
                 borrowCmd.Parameters.AddWithValue("@bookId", bookId);
-                borrowCmd.Parameters.AddWithValue("@issueDate", DateTime.Now.ToString("O"));
-                borrowCmd.Parameters.AddWithValue("@dueDate", DateTime.Now.AddDays(14).ToString("O"));
+                borrowCmd.Parameters.AddWithValue("@issueDate", DateTime.Now);
+                borrowCmd.Parameters.AddWithValue("@dueDate", DateTime.Now.AddDays(14));
                 borrowCmd.Parameters.AddWithValue("@returnDate", DBNull.Value);
                 borrowCmd.Parameters.AddWithValue("@status", "Issued");
                 borrowCmd.Parameters.AddWithValue("@fineAmount", DBNull.Value);
                 borrowCmd.ExecuteNonQuery();
 
                 // Update reservation status
-                using var resCmd = new SqliteCommand("UPDATE Reservations SET Status = 'Completed' WHERE Id = @id", conn);
+                using var resCmd = new MySqlCommand("UPDATE Reservations SET Status = 'Completed' WHERE Id = @id", conn);
                 resCmd.Parameters.AddWithValue("@id", reservationId);
                 resCmd.ExecuteNonQuery();
             }
@@ -1064,15 +998,15 @@ namespace LibrarySystem
             return true;
         }
 
-        private static Reservation ReadReservation(SqliteDataReader reader)
+        private static Reservation ReadReservation(MySqlDataReader reader)
         {
             return new Reservation
             {
                 Id = reader.GetInt32(0),
                 StudentId = reader.GetInt32(1),
                 BookId = reader.GetInt32(2),
-                ReservationDate = DateTime.Parse(reader.GetString(3)),
-                HoldUntilDate = reader.IsDBNull(4) ? null : DateTime.Parse(reader.GetString(4)),
+                ReservationDate = reader.GetDateTime(3),
+                HoldUntilDate = reader.IsDBNull(4) ? null : reader.GetDateTime(4),
                 Status = reader.GetString(5)
             };
         }
@@ -1082,18 +1016,17 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand(
-                    "INSERT INTO Announcements (Title, Content, CreatedDate, IsActive) VALUES (@title, @content, @createdDate, @isActive); SELECT last_insert_rowid();",
+                using var cmd = new MySqlCommand(
+                    "INSERT INTO Announcements (Title, Content, CreatedDate, IsActive) VALUES (@title, @content, @createdDate, @isActive); SELECT LAST_INSERT_ID();",
                     conn);
                 cmd.Parameters.AddWithValue("@title", announcement.Title);
                 cmd.Parameters.AddWithValue("@content", announcement.Content);
-                cmd.Parameters.AddWithValue("@createdDate", DateTime.Now.ToString("O"));
+                cmd.Parameters.AddWithValue("@createdDate", DateTime.Now);
                 cmd.Parameters.AddWithValue("@isActive", announcement.IsActive ? 1 : 0);
                 announcement.Id = Convert.ToInt32(cmd.ExecuteScalar());
                 announcement.CreatedDate = DateTime.Now;
-                Announcements.Add(announcement);
             }
             OnDataChanged();
             return true;
@@ -1104,9 +1037,9 @@ namespace LibrarySystem
             lock (_lock)
             {
                 var announcements = new List<Announcement>();
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("SELECT * FROM Announcements WHERE IsActive = 1 ORDER BY CreatedDate DESC", conn);
+                using var cmd = new MySqlCommand("SELECT * FROM Announcements WHERE IsActive = 1 ORDER BY CreatedDate DESC", conn);
                 using var reader = cmd.ExecuteReader();
                 while (reader.Read())
                 {
@@ -1121,9 +1054,9 @@ namespace LibrarySystem
             lock (_lock)
             {
                 var announcements = new List<Announcement>();
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("SELECT * FROM Announcements ORDER BY CreatedDate DESC", conn);
+                using var cmd = new MySqlCommand("SELECT * FROM Announcements ORDER BY CreatedDate DESC", conn);
                 using var reader = cmd.ExecuteReader();
                 while (reader.Read())
                 {
@@ -1137,9 +1070,9 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("DELETE FROM Announcements WHERE Id = @id", conn);
+                using var cmd = new MySqlCommand("DELETE FROM Announcements WHERE Id = @id", conn);
                 cmd.Parameters.AddWithValue("@id", id);
                 var rowsAffected = cmd.ExecuteNonQuery();
                 if (rowsAffected > 0)
@@ -1151,14 +1084,14 @@ namespace LibrarySystem
             }
         }
 
-        private static Announcement ReadAnnouncement(SqliteDataReader reader)
+        private static Announcement ReadAnnouncement(MySqlDataReader reader)
         {
             return new Announcement
             {
                 Id = reader.GetInt32(0),
                 Title = reader.GetString(1),
                 Content = reader.GetString(2),
-                CreatedDate = DateTime.Parse(reader.GetString(3)),
+                CreatedDate = reader.GetDateTime(3),
                 IsActive = reader.GetInt32(4) == 1
             };
         }
@@ -1168,15 +1101,15 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand(
-                    "INSERT INTO PasswordResets (StudentId, Code, ExpiresAt, CreatedAt) VALUES (@studentId, @code, @expiresAt, @createdAt); SELECT last_insert_rowid();",
+                using var cmd = new MySqlCommand(
+                    "INSERT INTO PasswordResets (StudentId, Code, ExpiresAt, CreatedAt) VALUES (@studentId, @code, @expiresAt, @createdAt); SELECT LAST_INSERT_ID();",
                     conn);
                 cmd.Parameters.AddWithValue("@studentId", studentId);
                 cmd.Parameters.AddWithValue("@code", code);
-                cmd.Parameters.AddWithValue("@expiresAt", expiresAt.ToString("O"));
-                cmd.Parameters.AddWithValue("@createdAt", DateTime.Now.ToString("O"));
+                cmd.Parameters.AddWithValue("@expiresAt", expiresAt);
+                cmd.Parameters.AddWithValue("@createdAt", DateTime.Now);
                 cmd.ExecuteScalar();
             }
             return true;
@@ -1186,15 +1119,15 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("SELECT Id, StudentId, Code, ExpiresAt FROM PasswordResets WHERE StudentId = @studentId AND Code = @code", conn);
+                using var cmd = new MySqlCommand("SELECT Id, StudentId, Code, ExpiresAt FROM PasswordResets WHERE StudentId = @studentId AND Code = @code", conn);
                 cmd.Parameters.AddWithValue("@studentId", studentId);
                 cmd.Parameters.AddWithValue("@code", code);
                 using var reader = cmd.ExecuteReader();
                 if (reader.Read())
                 {
-                    return (reader.GetInt32(0), reader.GetInt32(1), reader.GetString(2), DateTime.Parse(reader.GetString(3)));
+                    return (reader.GetInt32(0), reader.GetInt32(1), reader.GetString(2), reader.GetDateTime(3));
                 }
                 return null;
             }
@@ -1204,9 +1137,9 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("DELETE FROM PasswordResets WHERE Id = @id", conn);
+                using var cmd = new MySqlCommand("DELETE FROM PasswordResets WHERE Id = @id", conn);
                 cmd.Parameters.AddWithValue("@id", id);
                 return cmd.ExecuteNonQuery() > 0;
             }
@@ -1217,9 +1150,9 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("SELECT COUNT(*) FROM Books", conn);
+                using var cmd = new MySqlCommand("SELECT COUNT(*) FROM Books", conn);
                 return Convert.ToInt32(cmd.ExecuteScalar());
             }
         }
@@ -1228,9 +1161,9 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("SELECT COUNT(*) FROM Students WHERE IsActive = 1", conn);
+                using var cmd = new MySqlCommand("SELECT COUNT(*) FROM Students WHERE IsActive = 1", conn);
                 return Convert.ToInt32(cmd.ExecuteScalar());
             }
         }
@@ -1239,9 +1172,9 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("SELECT COUNT(*) FROM BorrowRecords WHERE Status = 'Issued'", conn);
+                using var cmd = new MySqlCommand("SELECT COUNT(*) FROM BorrowRecords WHERE Status = 'Issued'", conn);
                 return Convert.ToInt32(cmd.ExecuteScalar());
             }
         }
@@ -1250,15 +1183,11 @@ namespace LibrarySystem
         {
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("SELECT COUNT(*) FROM BorrowRecords WHERE Status = 'Issued' AND date(DueDate) < date('now')", conn);
+                using var cmd = new MySqlCommand("SELECT COUNT(*) FROM BorrowRecords WHERE Status = 'Issued' AND DATE(DueDate) < CURDATE()", conn);
                 return Convert.ToInt32(cmd.ExecuteScalar());
             }
-
-        public static BorrowRecord? GetBorrowRecordById(int recordId)
-        {
-            lock (_lock) { return BorrowRecords.FirstOrDefault(r => r.Id == recordId); }
         }
 
         public static Student? GetStudentByEmail(string email)
@@ -1266,9 +1195,9 @@ namespace LibrarySystem
             if (string.IsNullOrWhiteSpace(email)) return null;
             lock (_lock)
             {
-                using var conn = new SqliteConnection(GetConnectionString());
+                using var conn = new MySqlConnection(GetConnectionString());
                 conn.Open();
-                using var cmd = new SqliteCommand("SELECT * FROM Students WHERE Email = @email", conn);
+                using var cmd = new MySqlCommand("SELECT * FROM Students WHERE Email = @email", conn);
                 cmd.Parameters.AddWithValue("@email", email);
                 using var reader = cmd.ExecuteReader();
                 if (reader.Read())

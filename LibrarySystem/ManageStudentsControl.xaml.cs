@@ -58,14 +58,48 @@ namespace LibrarySystem
 
         private void SearchButton_Click(object sender, RoutedEventArgs e)
         {
+            ApplyFilters();
+        }
+
+        private void ResetButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (SearchTextBox != null)
+            {
+                SearchTextBox.Text = "Search by Student ID or Name...";
+                SearchTextBox.Foreground = new System.Windows.Media.SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#999"));
+            }
+           
             LoadStudents();
         }
 
-        private void AddStudentButton_Click(object sender, RoutedEventArgs e)
+        private void ApplyFilters()
         {
-            // For now, students can sign up through the main window
-            MessageBox.Show("Students can register through the sign-up page on the login screen.", 
-                "Add Student", MessageBoxButton.OK, MessageBoxImage.Information);
+            try
+            {
+                if (StudentsDataGrid == null) return;
+
+                var all = DatabaseHelper.GetAllStudents().AsEnumerable();
+
+                // Text search filter
+                var searchText = SearchTextBox?.Text?.Trim();
+                if (!string.IsNullOrWhiteSpace(searchText) && searchText != "Search by Student ID or Name...")
+                {
+                    searchText = searchText.ToLower();
+                    all = all.Where(s => 
+                        s.StudentId.ToLower().Contains(searchText) || 
+                        s.FullName.ToLower().Contains(searchText) ||
+                        s.Email.ToLower().Contains(searchText));
+                }
+
+              
+
+                StudentsDataGrid.ItemsSource = all.ToList();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Filter failed: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
         }
+
     }
 }

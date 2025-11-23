@@ -105,7 +105,7 @@ namespace LibrarySystem
 
                 // Try student login first
                 var student = DatabaseHelper.GetStudentByEmailOrId(emailOrId);
-                if (student != null && student.Password == password && student.IsActive)
+                if (student != null && PasswordHelper.VerifyPassword(password, student.Password) && student.IsActive)
                 {
                     CurrentStudent = student;
                     StudentPortal studentportal = new StudentPortal();
@@ -119,7 +119,7 @@ namespace LibrarySystem
 
                 // Try admin login
                 var admin = DatabaseHelper.GetAdminByEmail(emailOrId);
-                if (admin != null && admin.Password == password)
+                if (admin != null && PasswordHelper.VerifyPassword(password, admin.Password))
                 {
                     AdminPage adminPage = new AdminPage();
                     adminPage.WindowState = WindowState.Maximized;
