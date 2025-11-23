@@ -1,0 +1,66 @@
+﻿<UserControl x:Class="LibrarySystem.ManageStudentsControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Background="White">
+        <StackPanel Margin="50">
+            <TextBlock Text="👤 Manage Students" 
+                       FontSize="36" 
+                       FontWeight="Bold" 
+                       Foreground="#7B1FA2" 
+                       Margin="0,0,0,30"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
+                <TextBox x:Name="SearchTextBox"
+                         Width="350" Height="40" 
+                         FontSize="16"
+                         VerticalContentAlignment="Center"
+                         Padding="10"
+                         Text="Search by Student ID or Name..." 
+                         Foreground="#999"
+                         GotFocus="SearchTextBox_GotFocus"
+                         LostFocus="SearchTextBox_LostFocus"/>
+                <Button Content="Search" 
+                        Width="120" Height="40" 
+                        Background="#7B1FA2" 
+                        Foreground="White" 
+                        BorderThickness="0" 
+                        FontSize="16"
+                        Margin="10,0,0,0"
+                        Cursor="Hand"
+                        Click="SearchButton_Click"/>
+                <Button Content="+ Add New Student" 
+                        Width="180" Height="40" 
+                        Background="#0541A5" 
+                        Foreground="White" 
+                        BorderThickness="0" 
+                        FontSize="16"
+                        Margin="10,0,0,0"
+                        Cursor="Hand"
+                        Click="AddStudentButton_Click"/>
+            </StackPanel>
+            <TextBlock Text="Student List" 
+                       FontSize="20" 
+                       FontWeight="SemiBold"
+                       Foreground="#333"
+                       Margin="0,20,0,10"/>
+            <Border BorderBrush="#DDD" BorderThickness="1" CornerRadius="5">
+                <DataGrid x:Name="StudentsDataGrid" Height="400" 
+                          AutoGenerateColumns="False" 
+                          CanUserAddRows="False" 
+                          IsReadOnly="True"
+                          GridLinesVisibility="None" 
+                          Background="White"
+                          AlternatingRowBackground="#F9F9F9"
+                          HeadersVisibility="Column"
+                          SelectionMode="Single">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Student ID" Width="120" Binding="{Binding StudentId}"/>
+                        <DataGridTextColumn Header="Name" Width="250" Binding="{Binding FullName}"/>
+                        <DataGridTextColumn Header="Email" Width="250" Binding="{Binding Email}"/>
+                        <DataGridTextColumn Header="Course" Width="150" Binding="{Binding Course}"/>
+                        <DataGridTextColumn Header="Section" Width="150" Binding="{Binding Section}"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Border>
+        </StackPanel>
+    </Grid>
+</UserControl>
