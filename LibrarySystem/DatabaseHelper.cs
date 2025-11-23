@@ -292,9 +292,6 @@ namespace LibrarySystem
                 new Book { Title = "Assessment and Evaluation", Author = "Philip Yang", ISBN = "COED-0020", Category = "College of Education", TotalCopies = 3, AvailableCopies = 3, AddedDate = DateTime.Now, YearPublished = 2017, Description = "Evaluating student learning outcomes." }
             };
 
-            Books.AddRange(coedList);
-
-
             // Engineering: 20 books
             var coeList = new List<Book>
             {
@@ -319,9 +316,6 @@ namespace LibrarySystem
                 new Book { Title = "Instrumentation and Measurement", Author = "Quinn Torres", ISBN = "COE-0019", Category = "College of Engineering", TotalCopies = 3, AvailableCopies = 3, AddedDate = DateTime.Now, YearPublished = 2016, Description = "Measurement systems and sensors." },
                 new Book { Title = "Renewable Energy Systems", Author = "Harold Green", ISBN = "COE-0020", Category = "College of Engineering", TotalCopies = 2, AvailableCopies = 2, AddedDate = DateTime.Now, YearPublished = 2022, Description = "Solar, wind, and eco-friendly systems." }
             };
-
-            Books.AddRange(coeList);
-
 
             // Business & Accountancy: 20 books
             var cbaList = new List<Book>
@@ -391,44 +385,6 @@ namespace LibrarySystem
             public string Code { get; set; } = string.Empty;
             public DateTime ExpiresAt { get; set; }
             public DateTime CreatedAt { get; set; }
-        }
-            catch
-            {
-                // ignore
-            }
-        }
-
-        private static bool LoadAccountsFromFile_NoLock()
-        {
-            try
-            {
-                if (!File.Exists(AccountsFile)) return false;
-                var json = File.ReadAllText(AccountsFile);
-                var ds = JsonSerializer.Deserialize<AccountStore>(json);
-                if (ds == null) return false;
-
-                Students.Clear(); Students.AddRange(ds.Students ?? new List<Student>());
-                Admins.Clear(); Admins.AddRange(ds.Admins ?? new List<Admin>());
-
-                PasswordResets.Clear();
-                if (ds.PasswordResets != null)
-                {
-                    foreach (var p in ds.PasswordResets)
-                    {
-                        PasswordResets.Add(new PasswordReset { Id = p.Id, StudentId = p.StudentId, Code = p.Code, ExpiresAt = p.ExpiresAt, CreatedAt = p.CreatedAt });
-                    }
-                }
-
-                _studentId = ds.StudentId == 0 ? (Students.Any() ? Students.Max(s => s.Id) + 1 : 1) : ds.StudentId;
-                _adminId = ds.AdminId == 0 ? (Admins.Any() ? Admins.Max(a => a.Id) + 1 : 1) : ds.AdminId;
-                _passwordResetId = ds.PasswordResetId == 0 ? (PasswordResets.Any() ? PasswordResets.Max(p => p.Id) + 1 : 1) : ds.PasswordResetId;
-
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
         }
 
         // Public API implementations (books, students, borrows, reservations, announcements, password resets, stats)
@@ -597,8 +553,6 @@ namespace LibrarySystem
                 student.CreatedAt = DateTime.Now;
                 student.IsActive = true;
                 if (string.IsNullOrWhiteSpace(student.StudentId)) student.StudentId = "S" + student.Id.ToString("D4");
-                Students.Add(student);
-                SaveAccountsToFile_NoLock();
             }
             OnDataChanged();
             return true;
@@ -1093,7 +1047,6 @@ namespace LibrarySystem
                 cmd.Parameters.AddWithValue("@isActive", announcement.IsActive ? 1 : 0);
                 announcement.Id = Convert.ToInt32(cmd.ExecuteScalar());
                 announcement.CreatedDate = DateTime.Now;
-                Announcements.Add(announcement);
             }
             OnDataChanged();
             return true;
@@ -1255,10 +1208,6 @@ namespace LibrarySystem
                 using var cmd = new SqliteCommand("SELECT COUNT(*) FROM BorrowRecords WHERE Status = 'Issued' AND date(DueDate) < date('now')", conn);
                 return Convert.ToInt32(cmd.ExecuteScalar());
             }
-
-        public static BorrowRecord? GetBorrowRecordById(int recordId)
-        {
-            lock (_lock) { return BorrowRecords.FirstOrDefault(r => r.Id == recordId); }
         }
 
         public static Student? GetStudentByEmail(string email)
